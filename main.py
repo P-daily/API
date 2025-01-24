@@ -1,6 +1,7 @@
 ﻿import time
 import numpy as np
 import cv2
+from sqlalchemy.sql.sqltypes import NULLTYPE
 
 from ultralytics import YOLO
 from paddleocr import PaddleOCR
@@ -15,6 +16,8 @@ app.config['SQLALCHEMY_DATABASE_URI'] = 'mysql+pymysql://root:@localhost/parking
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 db = SQLAlchemy(app)
+
+last_detected_plate = None
 
 
 class ParkingType(enum.Enum):
@@ -35,8 +38,8 @@ class AllowedLicensePlate(db.Model):
 
 class CarsOnParking(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    license_plate = db.Column(db.String, nullable=False)
-    entry_timestamp = db.Column(db.DateTime, nullable=False)
+    license_plate = db.Column(db.String, nullable=False, unique=True)
+    entry_timestamp = db.Column(db.DateTime, nullable=False, default=db.func.current_timestamp())
 
 
 class CarPosition(db.Model):
@@ -96,41 +99,57 @@ def manage_parking_areas():
             return jsonify({'error': 'Expected a list of parking areas'}), 400
 
         for area in data:
+            area_id = area.get('id')
             top_left_x = area.get('top_left_x')
             top_left_y = area.get('top_left_y')
             bottom_right_x = area.get('bottom_right_x')
             bottom_right_y = area.get('bottom_right_y')
-            parking_type = area.get('parking_type')
+            parking_type = area.get('type')
 
-            if not all([top_left_x, top_left_y, bottom_right_x, bottom_right_y, parking_type.value]):
+            # check if any car is parked in the area
+            cars = CarPosition.query.all()
+            parked_car = None
+            for car in cars:
+                if top_left_x <= car.center_x <= bottom_right_x and top_left_y <= car.center_y <= bottom_right_y:
+                    parked_car = car
+                    break
+
+            if not all([area_id, top_left_x, top_left_y, bottom_right_x, bottom_right_y, parking_type]):
                 return jsonify({
-                                   'error': 'Each parking area must include top_left_x, top_left_y, bottom_right_x, bottom_right_y, and parking_type'}), 400
+                    'error': 'Each parking area must include top_left_x, top_left_y, bottom_right_x, bottom_right_y, and parking_type'}), 400
 
-            existing_area = ParkingArea.query.filter_by(top_left_x=top_left_x, top_left_y=top_left_y,
-                                                        bottom_right_x=bottom_right_x,
-                                                        bottom_right_y=bottom_right_y).first()
+            existing_area = ParkingArea.query.filter_by(id=area_id).first()
 
             if existing_area:
-                existing_area.parking_type.value = parking_type.value
+                existing_area.top_left_x = top_left_x
+                existing_area.top_left_y = top_left_y
+                existing_area.bottom_right_x = bottom_right_x
+                existing_area.bottom_right_y = bottom_right_y
+                existing_area.parking_type = parking_type
+                existing_area.license_plate = parked_car.license_plate if parked_car else None
 
             else:
                 new_area = ParkingArea(
+                    id=area_id,
                     top_left_x=top_left_x,
                     top_left_y=top_left_y,
                     bottom_right_x=bottom_right_x,
                     bottom_right_y=bottom_right_y,
-                    parking_type=parking_type.value
+                    parking_type=parking_type,
+                    license_plate=parked_car.license_plate if parked_car else None
                 )
                 db.session.add(new_area)
         db.session.commit()
-        return jsonify({'message': 'Parking areas updated successfully!'}), 200
+        return jsonify({'message': 'Parking areas updated successfully!'}), 201
 
 
 @app.route('/is_entrance_allowed/<string:license_plate>', methods=['GET'])
 def is_allowed(license_plate):
+    print(license_plate)
     plate = AllowedLicensePlate.query.filter_by(license_plate=license_plate).first()
+    print(plate)
     if plate:
-        return jsonify({'is_allowed': True, 'parking_type': plate.parking_type.value})
+        return jsonify({'is_allowed': True, 'parking_type': plate.parking_type.value}), 200
     else:
         return jsonify({'is_allowed': False}), 404
 
@@ -139,12 +158,24 @@ def is_allowed(license_plate):
 def is_parking_allowed(license_plate, parking_type):
     plate = AllowedLicensePlate.query.filter_by(license_plate=license_plate, parking_type=parking_type).first()
     if plate:
-        return jsonify({'is_allowed': True})
+        return jsonify({'is_allowed': True}), 200
     else:
         return jsonify({'is_allowed': False}), 404
 
 
-@app.route('/cars_entrance', methods=['GET', 'POST', 'DELETE'])
+@app.route('/is_car_out_of_entrance', methods=['GET'])
+def is_car_out_of_entrance():
+    car = CarsOnParking.query.order_by(CarsOnParking.entry_timestamp.desc()).first()
+    if not car:
+        return jsonify({'is_out': True}), 200
+    entrance_area = ParkingArea.query.filter_by(parking_type=ParkingType.ENTRANCE).first()
+    if entrance_area.license_plate != car.license_plate:
+        return jsonify({'is_out': True}), 200
+    else:
+        return jsonify({'is_out': False}), 200
+
+
+@app.route('/car_entrance', methods=['GET', 'POST', 'DELETE'])
 def manage_cars_on_parking():
     if request.method == 'GET':
         cars = CarsOnParking.query.all()
@@ -153,7 +184,7 @@ def manage_cars_on_parking():
 
     elif request.method == 'POST':
         data = request.json
-        new_car = CarsOnParking(license_plate=data['license_plate'], entry_timestamp=data['entry_timestamp'])
+        new_car = CarsOnParking(license_plate=data['license_plate'])
         db.session.add(new_car)
         db.session.commit()
         return jsonify({'message': 'Car entry logged successfully!'}), 201
@@ -182,7 +213,7 @@ def manage_car_position():
             'left_top_y': p.left_top_y,
             'right_bottom_x': p.right_bottom_x,
             'right_bottom_y': p.right_bottom_y
-        } for p in positions])
+        } for p in positions]), 200
 
     elif request.method == 'POST':
         data = request.json
@@ -201,10 +232,11 @@ def manage_car_position():
 
             if not all([license_plate, center_x, center_y, left_top_x, left_top_y, right_bottom_x, right_bottom_y]):
                 return jsonify({
-                                   'error': 'Each position must include license_plate, center_x, center_y, left_top_x, left_top_y, right_bottom_x, and right_bottom_y'}), 400
+                    'error': 'Each position must include license_plate, center_x, center_y, left_top_x, left_top_y, right_bottom_x, and right_bottom_y'}), 400
 
             existing_position = CarPosition.query.filter_by(license_plate=license_plate).first()
 
+            # Jeśli istnieje samochód, to zaktualizuj jego pozycję
             if existing_position:
                 existing_position.center_x = center_x
                 existing_position.center_y = center_y
@@ -225,7 +257,19 @@ def manage_car_position():
                 )
                 db.session.add(new_position)
         db.session.commit()
-        return jsonify({'message': 'Positions updated successfully!'}), 200
+        return jsonify({'message': 'Positions updated successfully!'}), 201
+
+
+@app.route('/license_plate_by_position/<int:center_x>/<int:center_y>', methods=['GET'])
+def get_license_plate_by_position(center_x, center_y):
+    cars = CarPosition.query.all()
+    if len(cars) == 0:
+        return jsonify({'error': 'No cars detected'}), 404
+    distances = []
+    for car in cars:
+        distances.append((car.license_plate, np.sqrt((center_x - car.center_x) ** 2 + (center_y - car.center_y) ** 2)))
+    closest_car = min(distances, key=lambda x: x[1])
+    return jsonify({'license_plate': closest_car[0]}), 200
 
 
 @app.route('/is_properly_parked/<string:license_plate>', methods=['GET'])
@@ -235,7 +279,7 @@ def is_properly_parked(license_plate):
     car_parking_type = AllowedLicensePlate.query.filter_by(license_plate=car.license_plate).first().parking_type
 
     parking_area_boundary = (
-    parking_area.top_left_x, parking_area.top_left_y, parking_area.bottom_right_x, parking_area.bottom_right_y)
+        parking_area.top_left_x, parking_area.top_left_y, parking_area.bottom_right_x, parking_area.bottom_right_y)
     car_boundary = (car.left_top_x, car.left_top_y, car.right_bottom_x, car.right_bottom_y)
 
     if car_parking_type.value != parking_area.parking_type.value:
@@ -248,88 +292,22 @@ def is_properly_parked(license_plate):
         return jsonify({'is_properly_parked': False, 'reason': 'not_in_proper_boundaries'}), 404
 
 
-@app.route('/scan', methods=['GET'])
-def scan_license_plate():
-    ip_camera_url = "http://192.168.0.83:8080/video"
-    cap = cv2.VideoCapture(ip_camera_url)
+@app.route('/license_plate_from_entrance', methods=['GET', 'POST'])
+def get_license_plate_from_entrance():
+    global last_detected_plate
 
-    if not cap.isOpened():
-        print("Error: Unable to connect to the IP camera.")
-        return jsonify({'error': 'Unable to connect to the IP camera.'}), 500
+    if request.method == 'GET':
+        return jsonify({'license_plate': last_detected_plate}), 200
 
-    # Process every n-th frame
-    frame_skip_interval = 10
-    frame_count = 0
-    last_detection = None
-    detection_count = 0
+    elif request.method == 'POST':
+        data = request.json
+        license_plate = data.get('license_plate')
 
-    # Start the timer
-    start_time = time.time()
-    timeout_seconds = 15
+        if not license_plate:
+            return jsonify({'error': 'Expected license_plate'}), 400
 
-    # Load YOLO model
-    model = YOLO("best_plate_detector_model.pt")
-
-    # Initialize PaddleOCR
-    ocr = PaddleOCR(use_angle_cls=True, lang='en')
-
-    while True:
-        # Check if timeout is reached
-        if time.time() - start_time > timeout_seconds:
-            print("Timeout reached. No license plate detected.")
-            cap.release()
-            cv2.destroyAllWindows()
-            return jsonify({'error': 'Timeout reached. No license plate detected.'}), 408
-
-        ret, frame = cap.read()  # Capture a frame from the video stream
-        if not ret:
-            print("Failed to grab frame from IP camera.")
-            cap.release()
-            cv2.destroyAllWindows()
-            return jsonify({'error': 'Failed to grab frame from IP camera.'}), 500
-
-        frame_count += 1
-        if frame_count % frame_skip_interval != 0:
-            continue
-
-        # Perform inference on the current frame
-        results = model(frame)
-
-        # Extract bounding box information
-        if results and results[0].boxes:  # Check if any detections exist
-            for box in results[0].boxes:  # Iterate over detected boxes
-                xyxy = box.xyxy.cpu().numpy()[0]  # Extract coordinates
-                x1, y1, x2, y2 = map(int, xyxy)
-
-                # Crop the image using the coordinates
-                cropped_img = frame[y1:y2, x1:x2]  # Crop the license plate region
-
-
-                result = ocr.ocr(cropped_img, cls=True)
-
-                if result and result[0]:
-                    detected_text = result[0][0][1][0]
-
-                    if detected_text:
-                        if last_detection == detected_text:
-                            detection_count += 1
-                        else:
-                            last_detection = detected_text
-                            detection_count = 1
-
-                        # If the same text is detected 5 times, return it
-                        if detection_count >= 5:
-                            cap.release()
-                            cv2.destroyAllWindows()
-                            return jsonify({'detected_text': detected_text}), 200
-
-        # Break the loop when the user presses 'Esc'
-        if cv2.waitKey(1) & 0xFF == 27:  # 27 is the ASCII code for the 'Esc' key
-            break
-
-    cap.release()
-    cv2.destroyAllWindows()
-    return jsonify({'error': 'No license plate detected.'}), 400
+        last_detected_plate = license_plate
+        return jsonify({'message': 'License plate added successfully!'}), 201
 
 
 if __name__ == '__main__':
