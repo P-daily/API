@@ -60,6 +60,33 @@ class ParkingArea(db.Model):
     license_plate = db.Column(db.String(50), nullable=True)
 
 
+class Logs(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    timestamp = db.Column(db.DateTime, nullable=False, default=db.func.current_timestamp())
+    type = db.Column(db.String(50), nullable=False)
+    log = db.Column(db.String(200), nullable=False)
+
+
+@app.route('/logs', methods=['GET', 'POST'])
+def manage_logs():
+    if request.method == 'GET':
+        logs = Logs.query.all()
+        return jsonify([{
+            'id': l.id,
+            'timestamp': l.timestamp,
+            'type': l.type,
+            'log': l.log
+        } for l in logs]), 200
+
+    elif request.method == 'POST':
+        data = request.json
+        log_type = data.get('type')
+        log = data.get('log')
+        new_log = Logs(type=log_type, log=log)
+        db.session.add(new_log)
+        db.session.commit()
+        return jsonify({'message': 'Log added successfully!'}), 201
+
 # ENDPOINTY
 @app.route('/health', methods=['GET'])
 def health():
@@ -296,8 +323,8 @@ def is_properly_parked():
         if car.parking_type != area.parking_type:
             improperly_parked_cars.append({
                 'license_plate': car.license_plate,
-                'expected_parking_type': car.parking_type.value,
-                'actual_parking_type': area.parking_type.value
+                'expected': car.parking_type.value,
+                'actual': area.parking_type.value
             })
 
 
