@@ -223,10 +223,7 @@ def manage_car_position():
 
     elif request.method == 'POST':
         data = request.json
-
-        if not isinstance(data, list):
-            return jsonify({'error': 'Expected a list of positions'}), 400
-
+        data = [data] if not isinstance(data, list) else data
         for position in data:
             license_plate = position.get('license_plate')
             center_x = position.get('center_x')
@@ -266,33 +263,24 @@ def manage_car_position():
         return jsonify({'message': 'Positions updated successfully!'}), 201
 
 
-@app.route('/license_plate_by_position/<int:center_x>/<int:center_y>', methods=['GET'])
-def get_license_plate_by_position(center_x, center_y):
+@app.route('/all_license_plates_positions', methods=['GET'])
+def get_all_license_plate_positions():
     cars = CarPosition.query.all()
 
     if not cars:
         return jsonify({'error': 'No cars detected'}), 404
 
-    distances = [
-        (car.license_plate, (center_x - car.center_x) ** 2 + (center_y - car.center_y) ** 2)
+    # Collect all car positions and license plates
+    car_positions = [
+        {
+            'license_plate': car.license_plate,
+            'center_x': car.center_x,
+            'center_y': car.center_y
+        }
         for car in cars
     ]
-    #print car.center_x, car.center_y, center_x, center_y for each car
-    for car in cars:
-        print(f"car.center_x: {car.center_x}, car.center_y: {car.center_y}, center_x: {center_x}, center_y: {center_y}")
-    print("Distances:", distances)
-    closest_car = min(distances, key=lambda x: x[1])
-    print("Closest car:", closest_car)
-
-    if closest_car[1] > 1000:
-        return jsonify({'license_plate': None}), 200
-
-    # if closest car in the entrance area, do not return it
-    entrance_area = ParkingArea.query.filter_by(parking_type=ParkingType.ENTRANCE).first()
-    exit_area = ParkingArea.query.filter_by(parking_type=ParkingType.EXITV2).first()
-    if entrance_area.license_plate == closest_car[0] or exit_area.license_plate == closest_car[0]:
-        return jsonify({'license_plate': None}), 200
-    return jsonify({'license_plate': closest_car[0]}), 200
+    print(car_positions)
+    return jsonify({'cars': car_positions}), 200
 
 
 @app.route('/is_properly_parked/<string:license_plate>', methods=['GET'])
@@ -336,9 +324,12 @@ def get_license_plate_from_entrance():
 @app.route('/car_exit/<string:license_plate>', methods=['DELETE'])
 def car_exit(license_plate):
     car = CarsOnParking.query.filter_by(license_plate=license_plate).first()
+    if not car:
+        return jsonify({'error': 'Car not found'}), 404
     db.session.delete(car)
     car_position = CarPosition.query.filter_by(license_plate=license_plate).first()
-    db.session.delete(car_position)
+    if car_position:
+        db.session.delete(car_position)
     db.session.commit()
     return jsonify({'message': 'Car exited successfully!'}), 200
 
