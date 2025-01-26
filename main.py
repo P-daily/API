@@ -176,11 +176,6 @@ def is_car_out_of_entrance():
 
     entrance_area = ParkingArea.query.filter_by(parking_type=ParkingType.ENTRANCE).first()
 
-    # print("Entrance area:", entrance_area.license_plate)
-    # print("Entrance id:", entrance_area.id)
-    # print("Car:", car.license_plate)
-    # print("Car entry:", car.entry_timestamp)
-
     if entrance_area.license_plate != car.license_plate:
         return jsonify({'is_out': True}), 200
     else:
@@ -279,28 +274,38 @@ def get_all_license_plate_positions():
         }
         for car in cars
     ]
-    print(car_positions)
     return jsonify({'cars': car_positions}), 200
 
 
-@app.route('/is_properly_parked/<string:license_plate>', methods=['GET'])
-def is_properly_parked(license_plate):
-    car = CarPosition.query.filter_by(license_plate=license_plate).first()
-    parking_area = ParkingArea.query.filter_by(license_plate=car.license_plate).first()
-    car_parking_type = AllowedLicensePlate.query.filter_by(license_plate=car.license_plate).first().parking_type
+@app.route('/are_properly_parked', methods=['GET'])
+def is_properly_parked():
+    cars = AllowedLicensePlate.query.all()
+    if not cars:
+        return jsonify({'error': 'No cars detected'}), 401
 
-    parking_area_boundary = (
-        parking_area.top_left_x, parking_area.top_left_y, parking_area.bottom_right_x, parking_area.bottom_right_y)
-    car_boundary = (car.left_top_x, car.left_top_y, car.right_bottom_x, car.right_bottom_y)
+    parking_areas = ParkingArea.query.where(ParkingArea.license_plate.isnot(None)).all()
+    if not parking_areas:
+        return jsonify({'error': 'No parking areas defined'}), 401
 
-    if car_parking_type.value != parking_area.parking_type.value:
-        return jsonify({'is_properly_parked': False, 'reason': 'wrong_permission'}), 404
+    improperly_parked_cars = []
 
-    if parking_area_boundary[0] <= car_boundary[0] and parking_area_boundary[1] <= car_boundary[1] and \
-            parking_area_boundary[2] >= car_boundary[2] and parking_area_boundary[3] >= car_boundary[3]:
-        return jsonify({'is_properly_parked': True})
-    else:
-        return jsonify({'is_properly_parked': False, 'reason': 'not_in_proper_boundaries'}), 404
+    for area in parking_areas:
+        car = AllowedLicensePlate.query.filter_by(license_plate=area.license_plate).first()
+        if area.parking_type in [ParkingType.ENTRANCE, ParkingType.EXIT, ParkingType.EXITV2, ParkingType.ROAD]:
+            continue
+        if car.parking_type != area.parking_type:
+            improperly_parked_cars.append({
+                'license_plate': car.license_plate,
+                'expected_parking_type': car.parking_type.value,
+                'actual_parking_type': area.parking_type.value
+            })
+
+
+
+    if improperly_parked_cars:
+        return jsonify({'is_parked_properly': False, 'improperly_parked_cars': improperly_parked_cars}), 404
+
+    return jsonify({'is_parked_properly': True}), 200
 
 
 @app.route('/license_plate_from_entrance', methods=['GET', 'POST'])
@@ -350,6 +355,7 @@ def get_license_plate_from_exit():
         return jsonify({'license_plate': exit_area.license_plate}), 200
     else:
         return jsonify({'license_plate': None}), 404
+
 
 if __name__ == '__main__':
     app.run(debug=True)
