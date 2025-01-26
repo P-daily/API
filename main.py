@@ -1,12 +1,13 @@
-﻿import time
-import threading
-from sqlalchemy import text
+﻿from sqlalchemy import text
 from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy.types import Enum as SqlEnum
 import enum
+from flask_cors import CORS
 
 app = Flask(__name__)
+CORS(app)
+
 app.config['SQLALCHEMY_DATABASE_URI'] = 'mysql+pymysql://root:@localhost/parking'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
@@ -90,7 +91,7 @@ def manage_logs():
 # ENDPOINTY
 @app.route('/health', methods=['GET'])
 def health():
-    return jsonify({'status': 'ok'}), 420
+    return jsonify({'status': 'ok'}), 200
 
 
 @app.route('/reset_db', methods=['GET'])
@@ -123,7 +124,8 @@ def manage_parking_areas():
             'top_left_y': a.top_left_y,
             'bottom_right_x': a.bottom_right_x,
             'bottom_right_y': a.bottom_right_y,
-            'parking_type': a.parking_type.value
+            'parking_type': a.parking_type.value,
+            'license_plate': a.license_plate
         } for a in areas])
 
     elif request.method == 'POST':
@@ -385,4 +387,4 @@ def get_license_plate_from_exit():
 
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=True, port=8080)
