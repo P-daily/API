@@ -1,11 +1,6 @@
 ﻿import time
-import numpy as np
-import cv2
-from sqlalchemy.sql.sqltypes import NULLTYPE
-
-from ultralytics import YOLO
-from paddleocr import PaddleOCR
-
+import threading
+from sqlalchemy import text
 from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy.types import Enum as SqlEnum
@@ -18,6 +13,7 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 
 last_detected_plate = None
+grab_license_plate = False
 
 
 class ParkingType(enum.Enum):
@@ -27,24 +23,25 @@ class ParkingType(enum.Enum):
     EXIT = "EXIT"
     ROAD = "ROAD"
     ENTRANCE = "ENTRANCE"
+    EXITV2 = "EXITV2"
 
 
 # MODELE
 class AllowedLicensePlate(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    license_plate = db.Column(db.String, nullable=False)
+    license_plate = db.Column(db.String(50), nullable=False)
     parking_type = db.Column(SqlEnum(ParkingType, name="parking_type_enum"), nullable=False)
 
 
 class CarsOnParking(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    license_plate = db.Column(db.String, nullable=False, unique=True)
+    license_plate = db.Column(db.String(50), nullable=False, unique=True)
     entry_timestamp = db.Column(db.DateTime, nullable=False, default=db.func.current_timestamp())
 
 
 class CarPosition(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    license_plate = db.Column(db.String, nullable=False)
+    license_plate = db.Column(db.String(50), nullable=False, unique=True)  # Make license_plate unique
     center_x = db.Column(db.Integer, nullable=False)
     center_y = db.Column(db.Integer, nullable=False)
     left_top_x = db.Column(db.Integer, nullable=False)
@@ -60,13 +57,23 @@ class ParkingArea(db.Model):
     bottom_right_x = db.Column(db.Integer, nullable=False)
     bottom_right_y = db.Column(db.Integer, nullable=False)
     parking_type = db.Column(SqlEnum(ParkingType, name="parking_type_enum"), nullable=False)
-    license_plate = db.Column(db.String, db.ForeignKey('car_position.license_plate'), nullable=True)
+    license_plate = db.Column(db.String(50), nullable=True)
 
 
 # ENDPOINTY
 @app.route('/health', methods=['GET'])
 def health():
     return jsonify({'status': 'ok'}), 420
+
+
+@app.route('/reset_db', methods=['GET'])
+def reset():
+    for table in reversed(db.metadata.sorted_tables):
+        if table.name != 'allowed_license_plate':
+            query = f'DROP TABLE IF EXISTS {table.name}'
+            db.session.execute(text(query))
+    db.create_all()
+    return jsonify({'message': 'Database reset successfully!'}), 200
 
 
 @app.route('/allowed_license_plates', methods=['GET'])
@@ -139,15 +146,13 @@ def manage_parking_areas():
                     license_plate=parked_car.license_plate if parked_car else None
                 )
                 db.session.add(new_area)
-        db.session.commit()
+            db.session.commit()
         return jsonify({'message': 'Parking areas updated successfully!'}), 201
 
 
 @app.route('/is_entrance_allowed/<string:license_plate>', methods=['GET'])
 def is_allowed(license_plate):
-    print(license_plate)
     plate = AllowedLicensePlate.query.filter_by(license_plate=license_plate).first()
-    print(plate)
     if plate:
         return jsonify({'is_allowed': True, 'parking_type': plate.parking_type.value}), 200
     else:
@@ -168,7 +173,14 @@ def is_car_out_of_entrance():
     car = CarsOnParking.query.order_by(CarsOnParking.entry_timestamp.desc()).first()
     if not car:
         return jsonify({'is_out': True}), 200
+
     entrance_area = ParkingArea.query.filter_by(parking_type=ParkingType.ENTRANCE).first()
+
+    # print("Entrance area:", entrance_area.license_plate)
+    # print("Entrance id:", entrance_area.id)
+    # print("Car:", car.license_plate)
+    # print("Car entry:", car.entry_timestamp)
+
     if entrance_area.license_plate != car.license_plate:
         return jsonify({'is_out': True}), 200
     else:
@@ -184,20 +196,14 @@ def manage_cars_on_parking():
 
     elif request.method == 'POST':
         data = request.json
+        # check if car is not already on parking
+        car = CarsOnParking.query.filter_by(license_plate=data['license_plate']).first()
+        if car:
+            return jsonify({'error': 'Car already on parking'}), 400
         new_car = CarsOnParking(license_plate=data['license_plate'])
         db.session.add(new_car)
         db.session.commit()
         return jsonify({'message': 'Car entry logged successfully!'}), 201
-
-    elif request.method == 'DELETE':
-        data = request.json
-        car = CarsOnParking.query.filter_by(license_plate=data['license_plate']).first()
-        if car:
-            db.session.delete(car)
-            db.session.commit()
-            return jsonify({'message': 'Car exit logged successfully!'}), 200
-        else:
-            return jsonify({'error': 'Car not found'}), 404
 
 
 @app.route('/car_position', methods=['GET', 'POST'])
@@ -263,12 +269,29 @@ def manage_car_position():
 @app.route('/license_plate_by_position/<int:center_x>/<int:center_y>', methods=['GET'])
 def get_license_plate_by_position(center_x, center_y):
     cars = CarPosition.query.all()
-    if len(cars) == 0:
+
+    if not cars:
         return jsonify({'error': 'No cars detected'}), 404
-    distances = []
+
+    distances = [
+        (car.license_plate, (center_x - car.center_x) ** 2 + (center_y - car.center_y) ** 2)
+        for car in cars
+    ]
+    #print car.center_x, car.center_y, center_x, center_y for each car
     for car in cars:
-        distances.append((car.license_plate, np.sqrt((center_x - car.center_x) ** 2 + (center_y - car.center_y) ** 2)))
+        print(f"car.center_x: {car.center_x}, car.center_y: {car.center_y}, center_x: {center_x}, center_y: {center_y}")
+    print("Distances:", distances)
     closest_car = min(distances, key=lambda x: x[1])
+    print("Closest car:", closest_car)
+
+    if closest_car[1] > 1000:
+        return jsonify({'license_plate': None}), 200
+
+    # if closest car in the entrance area, do not return it
+    entrance_area = ParkingArea.query.filter_by(parking_type=ParkingType.ENTRANCE).first()
+    exit_area = ParkingArea.query.filter_by(parking_type=ParkingType.EXITV2).first()
+    if entrance_area.license_plate == closest_car[0] or exit_area.license_plate == closest_car[0]:
+        return jsonify({'license_plate': None}), 200
     return jsonify({'license_plate': closest_car[0]}), 200
 
 
@@ -309,6 +332,33 @@ def get_license_plate_from_entrance():
         last_detected_plate = license_plate
         return jsonify({'message': 'License plate added successfully!'}), 201
 
+
+@app.route('/car_exit/<string:license_plate>', methods=['DELETE'])
+def car_exit(license_plate):
+    car = CarsOnParking.query.filter_by(license_plate=license_plate).first()
+    db.session.delete(car)
+    car_position = CarPosition.query.filter_by(license_plate=license_plate).first()
+    db.session.delete(car_position)
+    db.session.commit()
+    return jsonify({'message': 'Car exited successfully!'}), 200
+
+
+@app.route('/last_registered_license_plate', methods=['GET'])
+def last_registered_license_plate():
+    last_car = CarsOnParking.query.order_by(CarsOnParking.entry_timestamp.desc()).first()
+    if last_car:
+        return jsonify({'license_plate': last_car.license_plate}), 200
+    else:
+        return jsonify({'license_plate': None}), 404
+
+
+@app.route('/license_plate_from_exit', methods=['GET'])
+def get_license_plate_from_exit():
+    exit_area = ParkingArea.query.filter_by(parking_type=ParkingType.EXIT).first()
+    if exit_area.license_plate:
+        return jsonify({'license_plate': exit_area.license_plate}), 200
+    else:
+        return jsonify({'license_plate': None}), 404
 
 if __name__ == '__main__':
     app.run(debug=True)
