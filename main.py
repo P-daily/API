@@ -384,5 +384,25 @@ def get_license_plate_from_exit():
         return jsonify({'license_plate': None}), 404
 
 
+@app.route('/takes_one_slot',methods=['GET'])
+def take_one_slot_check():
+    parking_areas = ParkingArea.query.where(ParkingArea.license_plate.isnot(None)).all()
+    if not parking_areas:
+        return jsonify({'error': 'No parking areas defined'}), 401
+
+    improperly_parked_cars = []
+
+    for area in parking_areas:
+        car = CarPosition.query.filter_by(license_plate=area.license_plate).first()
+        if area.parking_type in [ParkingType.ENTRANCE, ParkingType.EXIT, ParkingType.EXITV2, ParkingType.ROAD]:
+            continue
+        if car.left_top_x > area.top_left_x and car.left_top_y > area.left_top_y and car.right_bottom_x < area.bottom_right_x and car.right_bottom_y < area.bottom_right_y:
+            improperly_parked_cars.append(car.license_plate)
+
+    if improperly_parked_cars:
+        return jsonify({'improperly_parked_cars': improperly_parked_cars}), 200
+    else:
+        return jsonify({'improperly_parked_cars': None}), 404
+
 if __name__ == '__main__':
     app.run(debug=True)
